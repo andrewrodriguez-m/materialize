@@ -58,6 +58,11 @@ pub struct ActiveSubscribe {
     pub output: SubscribeOutput,
 }
 
+const INSERT: Datum = Datum::String("insert");
+const UPSERT: Datum = Datum::String("upsert");
+const DELETE: Datum = Datum::String("delete");
+const KEY_VIOLATION: Datum = Datum::String("key_violation");
+
 impl ActiveSubscribe {
     pub(crate) fn initialize(&self) {
         // Always emit progress message indicating snapshot timestamp.
@@ -82,7 +87,7 @@ impl ActiveSubscribe {
                 packer.push(Datum::Null);
             }
 
-            if let SubscribeOutput::EnvelopeDebezium{ order_by_keys } = &self.output {
+            if let SubscribeOutput::EnvelopeDebezium { order_by_keys } = &self.output {
                 for _ in 0..(self.arity - order_by_keys.len()) {
                     packer.push(Datum::Null);
                 }
@@ -130,83 +135,10 @@ impl ActiveSubscribe {
                                     })
                                 });
                             }
-                            SubscribeOutput::EnvelopeUpsert { order_by_keys } => {
-                                let mut left_datum_vec = mz_repr::DatumVec::new();
-                                let mut right_datum_vec = mz_repr::DatumVec::new();
-                                rows.sort_by(|(left_time, left_row, left_diff), (right_time, right_row, right_diff)| {
-                                    left_time.cmp(right_time).then_with(|| {
-                                        let left_datums = left_datum_vec.borrow_with(left_row);
-                                        let right_datums = right_datum_vec.borrow_with(right_row);
-                                        compare_columns(order_by_keys, &left_datums, &right_datums, || left_diff.cmp(right_diff))
-                                    })
-                                });
-
-                                let mut new_rows = Vec::new();
-                                let mut it = rows.iter();
-                                let mut datum_vec = mz_repr::DatumVec::new();
-                                while let Some(start) = it.next() {
-                                    let group = iter::once(start)
-                                        .chain(it.take_while_ref(|row| {
-                                            let left_datums = left_datum_vec.borrow_with(&start.1);
-                                            let right_datums = right_datum_vec.borrow_with(&row.1);
-                                            start.0 == row.0
-                                                && compare_columns(
-                                                    order_by_keys,
-                                                    &left_datums,
-                                                    &right_datums,
-                                                    || Ordering::Equal,
-                                                ) == Ordering::Equal
-                                        }))
-                                        .collect_vec();
-
-                                    // Four cases:
-                                    // [(key, value, +1)] => ("upsert", key, value
-                                    // [(key, v1, -1), (key, v2, +1)] => ("upsert", key, v2)
-                                    // [(key, value, -1)] => ("delete", key, NULL)
-                                    // everything else => ("key_violation", key, NULL)
-                                    let mut packer = row_buf.packer();
-                                    new_rows.push(match &group[..] {
-                                        [(_, row, 1)] | [(_, _, -1), (_, row, 1)] => {
-                                            // upsert
-                                            let datums = datum_vec.borrow_with(row);
-                                            for column_order in order_by_keys {
-                                                packer.push(datums[column_order.column]);
-                                            }
-                                            for idx in 0..self.arity {
-                                                if !order_by_keys.iter().any(|co| co.column == idx)
-                                                {
-                                                    packer.push(datums[idx]);
-                                                }
-                                            }
-                                            (start.0, row_buf.clone(), 1)
-                                        }
-                                        [(_, _, -1)] => {
-                                            // delete
-                                            let datums = datum_vec.borrow_with(&start.1);
-                                            for column_order in order_by_keys {
-                                                packer.push(datums[column_order.column]);
-                                            }
-                                            for _ in 0..self.arity - order_by_keys.len() {
-                                                packer.push(Datum::Null);
-                                            }
-                                            (start.0, row_buf.clone(), -1)
-                                        }
-                                        _ => {
-                                            // key_violation
-                                            let datums = datum_vec.borrow_with(&start.1);
-                                            for column_order in order_by_keys {
-                                                packer.push(datums[column_order.column]);
-                                            }
-                                            for _ in 0..self.arity - order_by_keys.len() {
-                                                packer.push(Datum::Null);
-                                            }
-                                            (start.0, row_buf.clone(), 0)
-                                        }
-                                    });
-                                }
-                                rows = new_rows;
-                            }
-                            SubscribeOutput::EnvelopeDebezium { order_by_keys } => {
+                            SubscribeOutput::EnvelopeUpsert { order_by_keys }
+                            | SubscribeOutput::EnvelopeDebezium { order_by_keys } => {
+                                let debezium =
+                                    matches!(self.output, SubscribeOutput::EnvelopeDebezium { .. });
                                 let mut left_datum_vec = mz_repr::DatumVec::new();
                                 let mut right_datum_vec = mz_repr::DatumVec::new();
                                 rows.sort_by(|(left_time, left_row, left_diff), (right_time, right_row, right_diff)| {
@@ -245,13 +177,15 @@ impl ActiveSubscribe {
                                     let mut packer = row_buf.packer();
                                     new_rows.push(match &group[..] {
                                         [(_, row, 1)] => {
-                                            // insert
+                                            packer.push(if debezium { INSERT } else { UPSERT });
                                             let datums = datum_vec.borrow_with(row);
                                             for column_order in order_by_keys {
                                                 packer.push(datums[column_order.column]);
                                             }
-                                            for _ in 0..value_columns {
-                                                packer.push(Datum::Null);
+                                            if debezium {
+                                                for _ in 0..value_columns {
+                                                    packer.push(Datum::Null);
+                                                }
                                             }
                                             for idx in 0..self.arity {
                                                 if !order_by_keys.iter().any(|co| co.column == idx)
@@ -259,37 +193,45 @@ impl ActiveSubscribe {
                                                     packer.push(datums[idx]);
                                                 }
                                             }
-                                            (start.0, row_buf.clone(), 2)
+                                            (start.0, row_buf.clone(), 0)
                                         }
                                         [(_, _, -1)] => {
-                                            // delete
+                                            packer.push(DELETE);
                                             let datums = datum_vec.borrow_with(&start.1);
                                             for column_order in order_by_keys {
                                                 packer.push(datums[column_order.column]);
                                             }
-                                            for idx in 0..self.arity {
-                                                if !order_by_keys.iter().any(|co| co.column == idx)
-                                                {
-                                                    packer.push(datums[idx]);
+                                            if debezium {
+                                                for idx in 0..self.arity {
+                                                    if !order_by_keys
+                                                        .iter()
+                                                        .any(|co| co.column == idx)
+                                                    {
+                                                        packer.push(datums[idx]);
+                                                    }
                                                 }
                                             }
                                             for _ in 0..self.arity - order_by_keys.len() {
                                                 packer.push(Datum::Null);
                                             }
-                                            (start.0, row_buf.clone(), -1)
+                                            (start.0, row_buf.clone(), 0)
                                         }
                                         [(_, old_row, -1), (_, row, 1)] => {
-                                            // upsert
+                                            packer.push(UPSERT);
                                             let datums = datum_vec.borrow_with(row);
                                             let old_datums = old_datum_vec.borrow_with(old_row);
 
                                             for column_order in order_by_keys {
                                                 packer.push(datums[column_order.column]);
                                             }
-                                            for idx in 0..self.arity {
-                                                if !order_by_keys.iter().any(|co| co.column == idx)
-                                                {
-                                                    packer.push(old_datums[idx]);
+                                            if debezium {
+                                                for idx in 0..self.arity {
+                                                    if !order_by_keys
+                                                        .iter()
+                                                        .any(|co| co.column == idx)
+                                                    {
+                                                        packer.push(old_datums[idx]);
+                                                    }
                                                 }
                                             }
                                             for idx in 0..self.arity {
@@ -298,15 +240,20 @@ impl ActiveSubscribe {
                                                     packer.push(datums[idx]);
                                                 }
                                             }
-                                            (start.0, row_buf.clone(), 1)
+                                            (start.0, row_buf.clone(), 0)
                                         }
                                         _ => {
-                                            // key_violation
+                                            packer.push(KEY_VIOLATION);
                                             let datums = datum_vec.borrow_with(&start.1);
                                             for column_order in order_by_keys {
                                                 packer.push(datums[column_order.column]);
                                             }
-                                            for _ in 0..(2*(self.arity - order_by_keys.len())) {
+                                            if debezium {
+                                                for _ in 0..(self.arity - order_by_keys.len()) {
+                                                    packer.push(Datum::Null);
+                                                }
+                                            }
+                                            for _ in 0..(self.arity - order_by_keys.len()) {
                                                 packer.push(Datum::Null);
                                             }
                                             (start.0, row_buf.clone(), 0)
@@ -334,27 +281,13 @@ impl ActiveSubscribe {
                                     packer.push(Datum::False);
                                 }
 
-                                if matches!(self.output, SubscribeOutput::EnvelopeUpsert { .. }) {
-                                    packer.push(match diff {
-                                        -1 => Datum::String("delete"),
-                                        0 => Datum::String("key_violation"),
-                                        1 => Datum::String("upsert"),
-                                        _ => unreachable!(
-                                            "envelope upsert can only generate -1..1 diffs"
-                                        ),
-                                    });
-                                } else if matches!(self.output, SubscribeOutput::EnvelopeDebezium { .. }) {
-                                    packer.push(match diff {
-                                        -1 => Datum::String("delete"),
-                                        0 => Datum::String("key_violation"),
-                                        1 => Datum::String("upsert"),
-                                        2 => Datum::String("insert"),
-                                        _ => unreachable!(
-                                            "envelope debezium can only generate -1..2 diffs"
-                                        ),
-                                    });
-                                } else {
-                                    packer.push(Datum::Int64(diff));
+                                match &self.output {
+                                    SubscribeOutput::EnvelopeUpsert { .. }
+                                    | SubscribeOutput::EnvelopeDebezium { .. } => {}
+                                    SubscribeOutput::Diffs
+                                    | SubscribeOutput::WithinTimestampOrderBy { .. } => {
+                                        packer.push(Datum::Int64(diff));
+                                    }
                                 }
 
                                 packer.extend_by_row(&row);

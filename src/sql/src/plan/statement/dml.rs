@@ -447,7 +447,8 @@ pub fn describe_subscribe(
                 desc = desc.with_column(name, ty);
             } else {
                 ty.nullable = true;
-                before_values_desc = before_values_desc.with_column(format!("before_{}", name), ty.clone());
+                before_values_desc =
+                    before_values_desc.with_column(format!("before_{}", name), ty.clone());
                 after_values_desc = after_values_desc.with_column(name, ty);
             }
         }
