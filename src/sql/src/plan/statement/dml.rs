@@ -412,10 +412,9 @@ pub fn describe_subscribe(
         desc = desc.with_column("mz_progressed", ScalarType::Bool.nullable(false));
     }
 
-    let debezium = matches!(stmt.output, SubscribeOutput::EnvelopeDebezium{..});
+    let debezium = matches!(stmt.output, SubscribeOutput::EnvelopeDebezium { .. });
     match stmt.output {
-        SubscribeOutput::Diffs |
-        SubscribeOutput::WithinTimestampOrderBy { .. } => {
+        SubscribeOutput::Diffs | SubscribeOutput::WithinTimestampOrderBy { .. } => {
             desc = desc.with_column("mz_diff", ScalarType::Int64.nullable(true));
             for (name, mut ty) in relation_desc.into_iter() {
                 if progress {
@@ -424,8 +423,8 @@ pub fn describe_subscribe(
                 desc = desc.with_column(name, ty);
             }
         }
-        SubscribeOutput::EnvelopeUpsert { key_columns } |
-        SubscribeOutput::EnvelopeDebezium { key_columns } => {
+        SubscribeOutput::EnvelopeUpsert { key_columns }
+        | SubscribeOutput::EnvelopeDebezium { key_columns } => {
             desc = desc.with_column("mz_state", ScalarType::String.nullable(true));
             let key_columns = key_columns
                 .into_iter()

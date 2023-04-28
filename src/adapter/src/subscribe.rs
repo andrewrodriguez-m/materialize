@@ -173,7 +173,11 @@ impl ActiveSubscribe {
                                     let mut packer = row_buf.packer();
                                     new_rows.push(match &group[..] {
                                         [(_, row, 1)] => {
-                                            packer.push(if debezium { Datum::String("insert") } else { UPSERT });
+                                            packer.push(if debezium {
+                                                Datum::String("insert")
+                                            } else {
+                                                UPSERT
+                                            });
                                             let datums = datum_vec.borrow_with(row);
                                             for column_order in order_by_keys {
                                                 packer.push(datums[column_order.column]);
