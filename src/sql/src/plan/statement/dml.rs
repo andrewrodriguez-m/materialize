@@ -412,54 +412,44 @@ pub fn describe_subscribe(
         desc = desc.with_column("mz_progressed", ScalarType::Bool.nullable(false));
     }
 
-    if let SubscribeOutput::EnvelopeUpsert { key_columns } = stmt.output {
-        desc = desc.with_column("mz_state", ScalarType::String.nullable(true));
-        let key_columns = key_columns
-            .into_iter()
-            .map(normalize::column_name)
-            .collect_vec();
-        let mut values_desc = RelationDesc::empty();
-        for (name, mut ty) in relation_desc.into_iter() {
-            if key_columns.contains(&name) {
+    let debezium = matches!(stmt.output, SubscribeOutput::EnvelopeDebezium{..});
+    match stmt.output {
+        SubscribeOutput::Diffs |
+        SubscribeOutput::WithinTimestampOrderBy { .. } => {
+            desc = desc.with_column("mz_diff", ScalarType::Int64.nullable(true));
+            for (name, mut ty) in relation_desc.into_iter() {
                 if progress {
                     ty.nullable = true;
                 }
                 desc = desc.with_column(name, ty);
-            } else {
-                ty.nullable = true;
-                values_desc = values_desc.with_column(name, ty);
             }
         }
-        desc = desc.concat(values_desc);
-    } else if let SubscribeOutput::EnvelopeDebezium { key_columns } = stmt.output {
-        desc = desc.with_column("mz_state", ScalarType::String.nullable(true));
-        let key_columns = key_columns
-            .into_iter()
-            .map(normalize::column_name)
-            .collect_vec();
-        let mut before_values_desc = RelationDesc::empty();
-        let mut after_values_desc = RelationDesc::empty();
-        for (name, mut ty) in relation_desc.into_iter() {
-            if key_columns.contains(&name) {
-                if progress {
+        SubscribeOutput::EnvelopeUpsert { key_columns } |
+        SubscribeOutput::EnvelopeDebezium { key_columns } => {
+            desc = desc.with_column("mz_state", ScalarType::String.nullable(true));
+            let key_columns = key_columns
+                .into_iter()
+                .map(normalize::column_name)
+                .collect_vec();
+            let mut before_values_desc = RelationDesc::empty();
+            let mut after_values_desc = RelationDesc::empty();
+            for (name, mut ty) in relation_desc.into_iter() {
+                if key_columns.contains(&name) {
+                    if progress {
+                        ty.nullable = true;
+                    }
+                    desc = desc.with_column(name, ty);
+                } else {
                     ty.nullable = true;
+                    before_values_desc =
+                        before_values_desc.with_column(format!("before_{}", name), ty.clone());
+                    after_values_desc = after_values_desc.with_column(name, ty);
                 }
-                desc = desc.with_column(name, ty);
-            } else {
-                ty.nullable = true;
-                before_values_desc =
-                    before_values_desc.with_column(format!("before_{}", name), ty.clone());
-                after_values_desc = after_values_desc.with_column(name, ty);
             }
-        }
-        desc = desc.concat(before_values_desc).concat(after_values_desc);
-    } else {
-        desc = desc.with_column("mz_diff", ScalarType::Int64.nullable(true));
-        for (name, mut ty) in relation_desc.into_iter() {
-            if progress {
-                ty.nullable = true;
+            if debezium {
+                desc = desc.concat(before_values_desc);
             }
-            desc = desc.with_column(name, ty);
+            desc = desc.concat(after_values_desc);
         }
     }
     Ok(StatementDesc::new(Some(desc)))
