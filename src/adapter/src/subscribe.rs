@@ -58,11 +58,6 @@ pub struct ActiveSubscribe {
     pub output: SubscribeOutput,
 }
 
-const INSERT: Datum = Datum::String("insert");
-const UPSERT: Datum = Datum::String("upsert");
-const DELETE: Datum = Datum::String("delete");
-const KEY_VIOLATION: Datum = Datum::String("key_violation");
-
 impl ActiveSubscribe {
     pub(crate) fn initialize(&self) {
         // Always emit progress message indicating snapshot timestamp.
@@ -137,6 +132,7 @@ impl ActiveSubscribe {
                             }
                             SubscribeOutput::EnvelopeUpsert { order_by_keys }
                             | SubscribeOutput::EnvelopeDebezium { order_by_keys } => {
+                                const UPSERT: Datum = Datum::String("upsert");
                                 let debezium =
                                     matches!(self.output, SubscribeOutput::EnvelopeDebezium { .. });
                                 let mut left_datum_vec = mz_repr::DatumVec::new();
@@ -177,7 +173,7 @@ impl ActiveSubscribe {
                                     let mut packer = row_buf.packer();
                                     new_rows.push(match &group[..] {
                                         [(_, row, 1)] => {
-                                            packer.push(if debezium { INSERT } else { UPSERT });
+                                            packer.push(if debezium { Datum::String("insert") } else { UPSERT });
                                             let datums = datum_vec.borrow_with(row);
                                             for column_order in order_by_keys {
                                                 packer.push(datums[column_order.column]);
@@ -196,7 +192,7 @@ impl ActiveSubscribe {
                                             (start.0, row_buf.clone(), 0)
                                         }
                                         [(_, _, -1)] => {
-                                            packer.push(DELETE);
+                                            packer.push(Datum::String("delete"));
                                             let datums = datum_vec.borrow_with(&start.1);
                                             for column_order in order_by_keys {
                                                 packer.push(datums[column_order.column]);
@@ -243,7 +239,7 @@ impl ActiveSubscribe {
                                             (start.0, row_buf.clone(), 0)
                                         }
                                         _ => {
-                                            packer.push(KEY_VIOLATION);
+                                            packer.push(Datum::String("key_violation"));
                                             let datums = datum_vec.borrow_with(&start.1);
                                             for column_order in order_by_keys {
                                                 packer.push(datums[column_order.column]);
