@@ -267,8 +267,9 @@ where
     let (adapter_client, startup) = match adapter_client.startup(session).await {
         Ok(startup) => startup,
         Err(e) => {
+            tracing::info!("startup returning fatal error {e}");
             return conn
-                .send(ErrorResponse::from_adapter_error(Severity::Fatal, e))
+                .send(ErrorResponse::from_adapter_error(Severity::Panic, e))
                 .await
         }
     };

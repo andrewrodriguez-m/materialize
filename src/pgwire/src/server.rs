@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use openssl::ssl::{Ssl, SslContext};
 use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt, Interest, ReadBuf, Ready};
+use tokio::net::TcpStream;
 use tokio_openssl::SslStream;
 use tracing::trace;
 
@@ -133,7 +134,11 @@ impl Server {
                             internal,
                         })
                         .await?;
+                        tracing::info!("flushing conn");
                         conn.flush().await?;
+                        //conn.inner_mut().shutdown().await?;
+                        //tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tracing::info!("losing conn");
                         return Ok(());
                     }
 
@@ -144,6 +149,7 @@ impl Server {
                         adapter_client.cancel_request(conn_id, secret_key);
                         // For security, the client is not told whether the cancel
                         // request succeeds or fails.
+                        tracing::info!("losing conn");
                         return Ok(());
                     }
 
@@ -179,6 +185,7 @@ impl Server {
                 Err(_) => "error",
             };
             metrics.connection_status(status).inc();
+            tracing::info!("closing conn!");
         })
     }
 }

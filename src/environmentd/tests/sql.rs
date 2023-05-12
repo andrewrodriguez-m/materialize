@@ -3118,8 +3118,11 @@ fn test_auto_run_on_introspection_per_replica_relations() {
 
 #[test]
 fn test_max_connections() {
+    mz_ore::test::init_logging();
+    tracing::info!("start");
     let config = util::Config::default();
     let server = util::start_server(config).unwrap();
+    tracing::info!("server start");
 
     let mut mz_client = server
         .pg_config_internal()
@@ -3132,10 +3135,14 @@ fn test_max_connections() {
 
     // We already have one connection open (mz_system)
     let mut client1 = server.connect(postgres::NoTls).unwrap();
+    let _ = client1.query("SELECT 1", &[]).unwrap();
+    tracing::info!("client1 got response");
 
     let mut client2 = server.connect(postgres::NoTls).unwrap();
-    let _ = client1.batch_execute("SELECT 1").unwrap();
-    let e = client2.batch_execute("SELECT 1").expect_err("expect error");
+    tracing::info!("client2 connected");
+    let e = client2.query("SELECT 1", &[]).expect_err("expect error");
+    tracing::info!("client2 got error");
+
     let e = e
         .as_db_error()
         .unwrap_or_else(|| panic!("expect db error: {}", e));
@@ -3146,8 +3153,12 @@ fn test_max_connections() {
         e
     );
 
+    tracing::info!("client3 trying to connected");
     let mut client3 = server.connect(postgres::NoTls).unwrap();
-    let e = client3.batch_execute("SELECT 1").expect_err("expect error");
+    tracing::info!("client3 connected");
+
+    let e = client3.query("SELECT 1", &[]).expect_err("expect error");
+    tracing::info!("client3 got error");
     let e = e
         .as_db_error()
         .unwrap_or_else(|| panic!("expect db error: {}", e));
@@ -3164,6 +3175,6 @@ fn test_max_connections() {
         .connect(postgres::NoTls)
         .unwrap();
     mz_client2
-        .batch_execute("SELECT 1")
+        .query("SELECT 1", &[])
         .expect("super users are still allowed to do queries");
 }

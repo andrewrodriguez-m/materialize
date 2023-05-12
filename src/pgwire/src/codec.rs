@@ -197,6 +197,10 @@ where
     pub fn inner(&self) -> &Conn<A> {
         self.inner.get_ref().get_ref()
     }
+
+    pub fn inner_mut(&mut self) -> &mut Conn<A> {
+        self.inner.get_mut().get_mut()
+    }
 }
 
 #[async_trait]
