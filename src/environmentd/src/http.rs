@@ -23,10 +23,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{DefaultBodyLimit, FromRequestParts, Query};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Query, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::{routing, Extension, Router};
+use axum::{routing, Extension, Json, Router};
 use futures::future::{FutureExt, Shared, TryFutureExt};
 use headers::authorization::{Authorization, Basic, Bearer};
 use headers::{HeaderMapExt, HeaderName};
@@ -42,11 +42,12 @@ use mz_ore::tracing::TracingHandle;
 use mz_sql::session::user::{ExternalUserMetadata, User, HTTP_DEFAULT_USER, SYSTEM_USER};
 use mz_sql::session::vars::{ConnectionCounter, DropConnection, VarInput};
 use openssl::ssl::{Ssl, SslContext};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
+use tokio::sync::oneshot::error::TryRecvError;
 use tokio_openssl::SslStream;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{error, warn};
@@ -187,10 +188,88 @@ pub struct InternalHttpConfig {
     pub tracing_handle: TracingHandle,
     pub adapter_client_rx: oneshot::Receiver<mz_adapter::Client>,
     pub active_connection_count: Arc<Mutex<ConnectionCounter>>,
+    pub wait_for_leader_promotion: Option<oneshot::Sender<()>>,
+    pub stash_verify_finished: Option<oneshot::Receiver<()>>,
 }
 
 pub struct InternalHttpServer {
     router: Router,
+}
+
+#[derive(Debug)]
+pub struct LeaderState {
+    status: LeaderStatus,
+    pub wait_for_leader_promotion: Option<oneshot::Sender<()>>,
+    pub stash_verify_finished: Option<oneshot::Receiver<()>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LeaderStatusResponse {
+    status: LeaderStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+enum LeaderStatus {
+    IsLeader, // 200: The current leader returns this. It shouldn't need to know that another instance is attempting to update it.
+    Initializing, // 200: The new pod should return this status until it is ready to become the leader, or it has determined that it cannot proceed.
+    ReadyToPromote, // 200: Once we receive this status, we can tell it to become the leader and migrate the EIP.
+}
+
+/// Returns information about the current status of tracing.
+#[allow(clippy::unused_async)]
+pub async fn handle_leader_status(
+    State(state): State<Arc<Mutex<LeaderState>>>,
+) -> impl IntoResponse {
+    let mut leader_state = state.lock().expect("lock poisoned");
+    if let Some(mut stash_verify_finished) = leader_state.stash_verify_finished.take() {
+        match stash_verify_finished.try_recv() {
+            Ok(()) => leader_state.status = LeaderStatus::ReadyToPromote,
+            Err(TryRecvError::Empty) => {
+                leader_state.stash_verify_finished = Some(stash_verify_finished);
+            }
+            Err(TryRecvError::Closed) => panic!("other side closed for stash verifier"),
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(LeaderStatusResponse {
+            status: leader_state.status
+        })),
+    )
+}
+
+#[derive(Serialize, Deserialize)]
+struct BecomeLeaderResponse {
+    result: BecomeLeaderResult,
+}
+
+#[derive(Serialize, Deserialize)]
+enum BecomeLeaderResult {
+    Success, // 200: also return this if we are already the leader
+    Failure {
+        // 500, or 400 if called when not `ReadyToPromote`.
+        code: u64,
+        message: String,
+    },
+}
+
+pub async fn handle_leader_promote(
+    State(state): State<Arc<Mutex<LeaderState>>>,
+) -> impl IntoResponse {
+    let mut leader_state = state.lock().expect("lock poisoned");
+    leader_state
+        .wait_for_leader_promotion
+        .take()
+        .expect("already sent")
+        .send(())
+        .expect("other side disconnected");
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(BecomeLeaderResponse {
+            result: BecomeLeaderResult::Success,
+        })),
+    )
 }
 
 impl InternalHttpServer {
@@ -200,6 +279,8 @@ impl InternalHttpServer {
             tracing_handle,
             adapter_client_rx,
             active_connection_count,
+            wait_for_leader_promotion,
+            stash_verify_finished,
         }: InternalHttpConfig,
     ) -> InternalHttpServer {
         let router = base_router(BaseRouterConfig { profiling: true })
@@ -251,7 +332,18 @@ impl InternalHttpServer {
             .layer(Extension(adapter_client_rx.shared()))
             .layer(Extension(active_connection_count));
 
-        InternalHttpServer { router }
+        let leader_router = Router::new()
+            .route("/api/leader/status", routing::get(handle_leader_status))
+            .route("/api/leader/promote", routing::post(handle_leader_promote))
+            .with_state(Arc::new(Mutex::new(LeaderState {
+                status: LeaderStatus::Initializing,
+                wait_for_leader_promotion,
+                stash_verify_finished,
+            })));
+
+        InternalHttpServer {
+            router: router.merge(leader_router),
+        }
     }
 }
 

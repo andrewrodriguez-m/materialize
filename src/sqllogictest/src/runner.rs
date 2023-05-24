@@ -932,6 +932,7 @@ impl RunnerInner {
             launchdarkly_key_map: Default::default(),
             config_sync_loop_interval: None,
             bootstrap_role: Some("materialize".into()),
+            deploy_generation: None,
         };
         // We need to run the server on its own Tokio runtime, which in turn
         // requires its own thread, so that we can wait for any tasks spawned

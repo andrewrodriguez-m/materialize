@@ -79,6 +79,7 @@
 //! [differential dataflow]: ../differential_dataflow/index.html
 //! [timely dataflow]: ../timely/index.html
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::env;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -209,6 +210,8 @@ pub struct Config {
     pub launchdarkly_key_map: BTreeMap<String, String>,
     /// What role, if any, should be initially created with elevated privileges.
     pub bootstrap_role: Option<String>,
+    /// Generation we want deployed. Generally only present when doing a production deploy.
+    pub deploy_generation: Option<u64>,
 
     // === Tracing options. ===
     /// The metrics registry to use.
@@ -236,11 +239,6 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
     let tls = mz_postgres_util::make_tls(&tokio_postgres::config::Config::from_str(
         &config.adapter_stash_url,
     )?)?;
-    let stash = config
-        .controller
-        .postgres_factory
-        .open(config.adapter_stash_url.clone(), None, tls)
-        .await?;
 
     // Validate TLS configuration, if present.
     let (pgwire_tls, http_tls) = match &config.tls {
@@ -283,6 +281,9 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
     let (internal_http_listener, internal_http_conns) =
         server::listen(config.internal_http_listen_addr).await?;
 
+    let (stash_verify_finished_tx, stash_verify_finished_rx) = oneshot::channel();
+    let (wait_for_leader_promotion_tx, wait_for_leader_promotion_rx) = oneshot::channel();
+
     // Start the internal HTTP server.
     //
     // We start this server before we've completed initialization so that
@@ -296,9 +297,82 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
             tracing_handle: config.tracing_handle,
             adapter_client_rx: internal_http_adapter_client_rx,
             active_connection_count: Arc::clone(&active_connection_count),
+            wait_for_leader_promotion: Some(wait_for_leader_promotion_tx),
+            stash_verify_finished: Some(stash_verify_finished_rx),
         });
         server::serve(internal_http_conns, internal_http_server)
     });
+
+    /*
+        if stash_generation < running_generation {
+        // Spawn listener for /api/leader/status API
+        // Mark pod ready in readiness probe.
+        info!("new version, validating update...")
+        // Basically run the stash verify tool that already exists.
+        run_stash_verify_tool()?;
+
+        info!("new version validated, waiting for go signal")
+        // Change responses to /api/leader/status to ReadyToPromote
+
+        // Wait for /api/leader/promote API.
+    }
+    else if stash_generation > running_generation {
+        halt!("defunct generation; exiting")
+    }
+
+    // Commit stash migrations, continue boot etc.
+     */
+
+    //let wait_for_leader_promotion = matches!(config.deploy_generation, Some(_));
+    if let Some(deploy_generation) = config.deploy_generation {
+        tracing::info!("Requested deploy generation {deploy_generation}");
+        let savepoint_stash = config
+            .controller
+            .postgres_factory
+            .open_savepoint(config.adapter_stash_url.clone(), tls.clone())
+            .await?;
+        let adapter_storage = mz_adapter::catalog::storage::Connection::open(
+            savepoint_stash,
+            config.now.clone(),
+            &BootstrapArgs {
+                default_cluster_replica_size: config.bootstrap_default_cluster_replica_size,
+                builtin_cluster_replica_size: config.bootstrap_builtin_cluster_replica_size,
+                // TODO(benesch, brennan): remove this after v0.27.0-alpha.4 has
+                // shipped to cloud since all clusters will have had a default
+                // availability zone installed.
+                default_availability_zone: config
+                    .availability_zones
+                    .choose(&mut rand::thread_rng())
+                    .cloned()
+                    .unwrap_or_else(|| mz_adapter::DUMMY_AVAILABILITY_ZONE.into()),
+                bootstrap_role: config.bootstrap_role,
+            },
+        )
+        .await?;
+
+        match stash_generation.cmp(&deploy_generation.try_into()?)
+            {
+                Ordering::Less => {
+
+                    tracing::info!("Performing stash verification");
+
+                    // TODO: uh, figure out how to verify stash, probably wait til after parker's changes
+
+                    stash_verify_finished_tx.send(()).expect("internal http server died");
+
+                    tracing::info!("Waiting for user to promote this envd to leader. For example, `curl -H 'Content-Type: application/json' -X POST 'http://{}/api/leader/promote'`", config.internal_http_listen_addr);
+                    let () = wait_for_leader_promotion_rx.await.expect("internal http server died");
+                }
+                Ordering::Equal => tracing::info!("Server requested generation {deploy_generation} which is equal to stash's generation"),
+                Ordering::Greater => mz_ore::halt!("Server started with requested generation {deploy_generation} but stash was already at {stash_generation}. We can't undo migrations."),
+            }
+    };
+
+    let stash = config
+        .controller
+        .postgres_factory
+        .open(config.adapter_stash_url.clone(), None, tls)
+        .await?;
 
     // Load the adapter catalog from disk.
     if !config
