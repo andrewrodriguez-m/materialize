@@ -454,17 +454,6 @@ impl Connection {
             .await?)
     }
 
-    pub fn update_user_version(&mut self, version: u64) -> Result<(), Error> {
-        let prev = self.configs.set(
-            ConfigKey {
-                key: USER_VERSION.to_string(),
-            },
-            Some(ConfigValue { value: version }),
-        )?;
-        assert!(prev.is_some());
-        Ok(())
-    }
-
     /// Load the persisted mapping of system object to global ID. Key is (schema-name, object-name).
     #[tracing::instrument(level = "info", skip_all)]
     pub async fn load_system_gids(
@@ -1384,6 +1373,17 @@ impl<'a> Transaction<'a> {
         } else {
             Err(SqlCatalogError::UnknownItem(id.to_string()).into())
         }
+    }
+
+    pub fn update_user_version(&mut self, version: u64) -> Result<(), Error> {
+        let prev = self.configs.set(
+            ConfigKey {
+                key: USER_VERSION.to_string(),
+            },
+            Some(ConfigValue { value: version }),
+        )?;
+        assert!(prev.is_some());
+        Ok(())
     }
 
     /// Updates persisted mapping from system objects to global IDs and fingerprints. Each element
