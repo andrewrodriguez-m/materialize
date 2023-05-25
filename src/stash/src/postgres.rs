@@ -77,6 +77,8 @@ CREATE TABLE uppers (
 );
 ";
 
+const DEPLOY_GENERATION: &str = "deploy_generation";
+
 // Force reconnection every few minutes to allow cockroach to rebalance
 // connections after it restarts during maintenance or upgrades.
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(300);
@@ -966,8 +968,6 @@ impl Stash {
     }
 
     pub async fn deploy_generation(&mut self) -> Result<Option<u64>, StashError> {
-        const DEPLOY_GENERATION: &str = "deploy_generation";
-
         self.with_transaction(|tx| {
             async move {
                 let config = COLLECTION_CONFIG.from_tx(&tx).await?;

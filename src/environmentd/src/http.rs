@@ -226,7 +226,7 @@ pub async fn handle_leader_status(
             Err(TryRecvError::Empty) => {
                 leader_state.ready_to_promote = Some(ready_to_promote);
             }
-            Err(TryRecvError::Closed) => panic!("other side closed for stash verifier"),
+            Err(TryRecvError::Closed) => panic!("other side closed ready_to_promote"),
         }
     }
     (
@@ -244,10 +244,9 @@ struct BecomeLeaderResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 enum BecomeLeaderResult {
-    Success, // 200: also return this if we are already the leader
+    Success, // 200 http status: also return this if we are already the leader
     Failure {
-        // 500, or 400 if called when not `ReadyToPromote`.
-        //code: u64,
+        // 500 http status if called when not `ReadyToPromote`.
         message: String,
     },
 }
