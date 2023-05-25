@@ -303,8 +303,9 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
         server::serve(internal_http_conns, internal_http_server)
     });
 
-    'done: {
-        let Some(deploy_generation) = config.deploy_generation else { break 'done };
+    tracing::info!("hello world");
+    'wait_for_leader_promotion: {
+        let Some(deploy_generation) = config.deploy_generation else { break 'wait_for_leader_promotion };
         tracing::info!("Requested deploy generation {deploy_generation}");
         let mut stash = match config
             .controller
@@ -315,13 +316,16 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
             Ok(stash) => stash,
             Err(e) => {
                 if e.can_recover_with_write_mode() {
-                    break 'done; // new stash
+                    tracing::info!("Stash doesn't exist, we need to create it");
+                    break 'wait_for_leader_promotion; // new stash
                 } else {
                     return Err(e.into());
                 }
             }
         };
-        let Some(stash_generation) = stash.deploy_generation().await? else { break 'done };
+        let Some(stash_generation) = stash.deploy_generation().await? else {
+                tracing::info!("Stash has no generation, not waiting for leader promotion");
+            break 'wait_for_leader_promotion };
         tracing::info!("Found stash generation {stash_generation:?}");
         match stash_generation.cmp(&deploy_generation) {
             Ordering::Less => {

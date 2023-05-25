@@ -80,6 +80,7 @@ use std::fmt::Write;
 use std::net::Ipv4Addr;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread::spawn;
 use std::time::{Duration, Instant};
 use std::{iter, thread};
 
@@ -96,6 +97,7 @@ use mz_sql::session::user::SYSTEM_USER;
 use reqwest::blocking::Client;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use tempfile::TempDir;
 use tokio_postgres::error::SqlState;
 use tracing::info;
 use tungstenite::error::ProtocolError;
@@ -1362,4 +1364,38 @@ fn test_max_connections_on_all_interfaces() {
     let text = res.text().expect("no body?");
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(text, "creating connection would violate max_connections limit (desired: 2, limit: 1, current: 1)");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // too slow
+fn test_leader_promotion() {
+    mz_ore::test::init_logging();
+    let tmpdir = TempDir::new().unwrap();
+    let config = util::Config::default()
+        .unsafe_mode()
+        .data_directory(tmpdir.path())
+        .with_deploy_generation(Some(2));
+    {
+        let server = util::start_server(config.clone()).unwrap();
+        let mut client = server.connect(postgres::NoTls).unwrap();
+        client.simple_query("SELECT 1").unwrap();
+    }
+    {
+        // start with same deploy generation, everything works
+        let server = util::start_server(config.clone()).unwrap();
+        let mut client = server.connect(postgres::NoTls).unwrap();
+        client.simple_query("SELECT 1").unwrap();
+    }
+    {
+        // start with different deploy generation, we need acknowledgement before starting sql port
+        let config = config.with_deploy_generation(Some(3));
+        thread::scope(|s| {
+            s.spawn(|| {
+                let server = util::start_server(config).unwrap();
+            })
+        });
+
+        let mut client = server.connect(postgres::NoTls).unwrap();
+        client.simple_query("SELECT 1").unwrap();
+    }
 }
