@@ -234,7 +234,7 @@ pub struct TlsConfig {
 }
 
 /// Start an `environmentd` server.
-//#[tracing::instrument(name = "environmentd::serve", level = "info", skip_all)]
+#[tracing::instrument(name = "environmentd::serve", level = "info", skip_all)]
 pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
     let tls = mz_postgres_util::make_tls(&tokio_postgres::config::Config::from_str(
         &config.adapter_stash_url,
@@ -313,11 +313,9 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
         let stash_generation = stash.deploy_generation().await?;
         tracing::info!("Found stash generation {stash_generation:?}");
         if let Some(stash_generation) = stash_generation {
-            match stash_generation.cmp(&deploy_generation)
-            {
+            match stash_generation.cmp(&deploy_generation) {
                 Ordering::Less => {
                     tracing::info!("Stash generation {stash_generation} is less than deploy generation {deploy_generation}. Performing pre-flight checks");
-
                     if let Err(e) = mz_adapter::catalog::storage::Connection::open(
                         stash,
                         config.now.clone(),
