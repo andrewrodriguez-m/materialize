@@ -303,44 +303,53 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
         server::serve(internal_http_conns, internal_http_server)
     });
 
-    if let Some(deploy_generation) = config.deploy_generation {
+    'done: {
+        let Some(deploy_generation) = config.deploy_generation else { break 'done };
         tracing::info!("Requested deploy generation {deploy_generation}");
-        let mut stash = config
+        let mut stash = match config
             .controller
             .postgres_factory
             .open_savepoint(config.adapter_stash_url.clone(), tls.clone())
-            .await?;
-        let stash_generation = stash.deploy_generation().await?;
-        tracing::info!("Found stash generation {stash_generation:?}");
-        if let Some(stash_generation) = stash_generation {
-            match stash_generation.cmp(&deploy_generation) {
-                Ordering::Less => {
-                    tracing::info!("Stash generation {stash_generation} is less than deploy generation {deploy_generation}. Performing pre-flight checks");
-                    if let Err(e) = mz_adapter::catalog::storage::Connection::open(
-                        stash,
-                        config.now.clone(),
-                        &BootstrapArgs {
-                            default_cluster_replica_size: config.bootstrap_default_cluster_replica_size.clone(),
-                            builtin_cluster_replica_size: config.bootstrap_builtin_cluster_replica_size.clone(),
-                            default_availability_zone: mz_adapter::DUMMY_AVAILABILITY_ZONE.into(),
-                            bootstrap_role: config.bootstrap_role.clone(),
-                        },
-                        None,
-                    )
-                    .await {
-                        return Err(anyhow!(e).context("Stash upgrade would have failed with this error"));
-                    }
-
-                    ready_to_promote_tx.send(()).expect("internal http server died");
-
-                    tracing::info!("Waiting for user to promote this envd to leader. For example, `curl -H 'Content-Type: application/json' -X POST 'http://{}/api/leader/promote'`", config.internal_http_listen_addr);
-                    let () = promote_leader_rx.await.expect("internal http server died");
+            .await
+        {
+            Ok(stash) => stash,
+            Err(e) => {
+                if e.can_recover_with_write_mode() {
+                    break 'done; // new stash
+                } else {
+                    return Err(e.into());
                 }
-                Ordering::Equal => tracing::info!("Server requested generation {deploy_generation} which is equal to stash's generation"),
-                Ordering::Greater => mz_ore::halt!("Server started with requested generation {deploy_generation} but stash was already at {stash_generation}. Deploy generations must increase monotonically"),
             }
+        };
+        let Some(stash_generation) = stash.deploy_generation().await? else { break 'done };
+        tracing::info!("Found stash generation {stash_generation:?}");
+        match stash_generation.cmp(&deploy_generation) {
+            Ordering::Less => {
+                tracing::info!("Stash generation {stash_generation} is less than deploy generation {deploy_generation}. Performing pre-flight checks");
+                if let Err(e) = mz_adapter::catalog::storage::Connection::open(
+                    stash,
+                    config.now.clone(),
+                    &BootstrapArgs {
+                        default_cluster_replica_size: config.bootstrap_default_cluster_replica_size.clone(),
+                        builtin_cluster_replica_size: config.bootstrap_builtin_cluster_replica_size.clone(),
+                        default_availability_zone: mz_adapter::DUMMY_AVAILABILITY_ZONE.into(),
+                        bootstrap_role: config.bootstrap_role.clone(),
+                    },
+                    None,
+                )
+                .await {
+                    return Err(anyhow!(e).context("Stash upgrade would have failed with this error"));
+                }
+
+                ready_to_promote_tx.send(()).expect("internal http server died");
+
+                tracing::info!("Waiting for user to promote this envd to leader. For example, `curl -H 'Content-Type: application/json' -X POST 'http://{}/api/leader/promote'`", config.internal_http_listen_addr);
+                let () = promote_leader_rx.await.expect("internal http server died");
+            }
+            Ordering::Equal => tracing::info!("Server requested generation {deploy_generation} which is equal to stash's generation"),
+            Ordering::Greater => mz_ore::halt!("Server started with requested generation {deploy_generation} but stash was already at {stash_generation}. Deploy generations must increase monotonically"),
         }
-    };
+    }
 
     let stash = config
         .controller
