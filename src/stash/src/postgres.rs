@@ -30,6 +30,7 @@ use tokio_postgres::error::SqlState;
 use tokio_postgres::{Client, Config, Statement};
 use tracing::{error, event, info, warn, Level};
 
+use crate::objects::proto::ConfigKey;
 use crate::upgrade;
 use crate::{
     AppendBatch, Data, Diff, Id, InternalStashError, StashCollection, StashError, Timestamp,
@@ -962,6 +963,27 @@ impl Stash {
         }
 
         Ok(())
+    }
+
+    pub async fn deploy_generation(&mut self) -> Result<Option<u64>, StashError> {
+        const DEPLOY_GENERATION: &str = "deploy_generation";
+
+        self.with_transaction(|tx| {
+            async move {
+                let config = COLLECTION_CONFIG.from_tx(&tx).await?;
+                let value = tx
+                    .peek_key_one(
+                        config,
+                        &ConfigKey {
+                            key: DEPLOY_GENERATION.into(),
+                        },
+                    )
+                    .await?;
+                Ok(value.map(|v| v.value))
+            }
+            .boxed()
+        })
+        .await
     }
 }
 

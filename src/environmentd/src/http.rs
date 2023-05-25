@@ -188,8 +188,8 @@ pub struct InternalHttpConfig {
     pub tracing_handle: TracingHandle,
     pub adapter_client_rx: oneshot::Receiver<mz_adapter::Client>,
     pub active_connection_count: Arc<Mutex<ConnectionCounter>>,
-    pub wait_for_leader_promotion: Option<oneshot::Sender<()>>,
-    pub stash_verify_finished: Option<oneshot::Receiver<()>>,
+    pub promote_leader: Option<oneshot::Sender<()>>,
+    pub ready_to_promote: Option<oneshot::Receiver<()>>,
 }
 
 pub struct InternalHttpServer {
@@ -199,8 +199,8 @@ pub struct InternalHttpServer {
 #[derive(Debug)]
 pub struct LeaderState {
     status: LeaderStatus,
-    pub wait_for_leader_promotion: Option<oneshot::Sender<()>>,
-    pub stash_verify_finished: Option<oneshot::Receiver<()>>,
+    pub promote_leader: Option<oneshot::Sender<()>>,
+    pub ready_to_promote: Option<oneshot::Receiver<()>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -208,24 +208,23 @@ struct LeaderStatusResponse {
     status: LeaderStatus,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum LeaderStatus {
     IsLeader, // 200: The current leader returns this. It shouldn't need to know that another instance is attempting to update it.
     Initializing, // 200: The new pod should return this status until it is ready to become the leader, or it has determined that it cannot proceed.
     ReadyToPromote, // 200: Once we receive this status, we can tell it to become the leader and migrate the EIP.
 }
 
-/// Returns information about the current status of tracing.
-#[allow(clippy::unused_async)]
 pub async fn handle_leader_status(
     State(state): State<Arc<Mutex<LeaderState>>>,
 ) -> impl IntoResponse {
     let mut leader_state = state.lock().expect("lock poisoned");
-    if let Some(mut stash_verify_finished) = leader_state.stash_verify_finished.take() {
-        match stash_verify_finished.try_recv() {
+    if let Some(mut ready_to_promote) = leader_state.ready_to_promote.take() {
+        assert_eq!(leader_state.status, LeaderStatus::Initializing);
+        match ready_to_promote.try_recv() {
             Ok(()) => leader_state.status = LeaderStatus::ReadyToPromote,
             Err(TryRecvError::Empty) => {
-                leader_state.stash_verify_finished = Some(stash_verify_finished);
+                leader_state.ready_to_promote = Some(ready_to_promote);
             }
             Err(TryRecvError::Closed) => panic!("other side closed for stash verifier"),
         }
@@ -238,17 +237,17 @@ pub async fn handle_leader_status(
     )
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BecomeLeaderResponse {
     result: BecomeLeaderResult,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 enum BecomeLeaderResult {
     Success, // 200: also return this if we are already the leader
     Failure {
         // 500, or 400 if called when not `ReadyToPromote`.
-        code: u64,
+        //code: u64,
         message: String,
     },
 }
@@ -257,19 +256,33 @@ pub async fn handle_leader_promote(
     State(state): State<Arc<Mutex<LeaderState>>>,
 ) -> impl IntoResponse {
     let mut leader_state = state.lock().expect("lock poisoned");
-    leader_state
-        .wait_for_leader_promotion
-        .take()
-        .expect("already sent")
-        .send(())
-        .expect("other side disconnected");
 
-    (
+    let success = (
         StatusCode::OK,
         Json(serde_json::json!(BecomeLeaderResponse {
             result: BecomeLeaderResult::Success,
         })),
-    )
+    );
+
+    match leader_state.status {
+        LeaderStatus::IsLeader => success,
+        LeaderStatus::Initializing => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!(BecomeLeaderResult::Failure {
+                message: "Not ready to promote, still initializing".into(),
+            })),
+        ),
+        LeaderStatus::ReadyToPromote => {
+            leader_state
+                .promote_leader
+                .take()
+                .expect("state machine bug")
+                .send(())
+                .expect("other side disconnected");
+            leader_state.status = LeaderStatus::IsLeader;
+            success
+        }
+    }
 }
 
 impl InternalHttpServer {
@@ -279,8 +292,8 @@ impl InternalHttpServer {
             tracing_handle,
             adapter_client_rx,
             active_connection_count,
-            wait_for_leader_promotion,
-            stash_verify_finished,
+            promote_leader,
+            ready_to_promote,
         }: InternalHttpConfig,
     ) -> InternalHttpServer {
         let router = base_router(BaseRouterConfig { profiling: true })
@@ -337,8 +350,8 @@ impl InternalHttpServer {
             .route("/api/leader/promote", routing::post(handle_leader_promote))
             .with_state(Arc::new(Mutex::new(LeaderState {
                 status: LeaderStatus::Initializing,
-                wait_for_leader_promotion,
-                stash_verify_finished,
+                promote_leader,
+                ready_to_promote,
             })));
 
         InternalHttpServer {

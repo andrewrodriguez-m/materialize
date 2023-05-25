@@ -89,7 +89,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use mz_adapter::catalog::storage::BootstrapArgs;
 use mz_adapter::catalog::ClusterReplicaSizeMap;
 use mz_adapter::config::{system_parameter_sync, SystemParameterBackend, SystemParameterFrontend};
@@ -234,7 +234,7 @@ pub struct TlsConfig {
 }
 
 /// Start an `environmentd` server.
-#[tracing::instrument(name = "environmentd::serve", level = "info", skip_all)]
+//#[tracing::instrument(name = "environmentd::serve", level = "info", skip_all)]
 pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
     let tls = mz_postgres_util::make_tls(&tokio_postgres::config::Config::from_str(
         &config.adapter_stash_url,
@@ -281,8 +281,8 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
     let (internal_http_listener, internal_http_conns) =
         server::listen(config.internal_http_listen_addr).await?;
 
-    let (stash_verify_finished_tx, stash_verify_finished_rx) = oneshot::channel();
-    let (wait_for_leader_promotion_tx, wait_for_leader_promotion_rx) = oneshot::channel();
+    let (ready_to_promote_tx, ready_to_promote_rx) = oneshot::channel();
+    let (promote_leader_tx, promote_leader_rx) = oneshot::channel();
 
     // Start the internal HTTP server.
     //
@@ -297,75 +297,51 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
             tracing_handle: config.tracing_handle,
             adapter_client_rx: internal_http_adapter_client_rx,
             active_connection_count: Arc::clone(&active_connection_count),
-            wait_for_leader_promotion: Some(wait_for_leader_promotion_tx),
-            stash_verify_finished: Some(stash_verify_finished_rx),
+            promote_leader: Some(promote_leader_tx),
+            ready_to_promote: Some(ready_to_promote_rx),
         });
         server::serve(internal_http_conns, internal_http_server)
     });
 
-    /*
-        if stash_generation < running_generation {
-        // Spawn listener for /api/leader/status API
-        // Mark pod ready in readiness probe.
-        info!("new version, validating update...")
-        // Basically run the stash verify tool that already exists.
-        run_stash_verify_tool()?;
-
-        info!("new version validated, waiting for go signal")
-        // Change responses to /api/leader/status to ReadyToPromote
-
-        // Wait for /api/leader/promote API.
-    }
-    else if stash_generation > running_generation {
-        halt!("defunct generation; exiting")
-    }
-
-    // Commit stash migrations, continue boot etc.
-     */
-
-    //let wait_for_leader_promotion = matches!(config.deploy_generation, Some(_));
     if let Some(deploy_generation) = config.deploy_generation {
         tracing::info!("Requested deploy generation {deploy_generation}");
-        let savepoint_stash = config
+        let mut stash = config
             .controller
             .postgres_factory
             .open_savepoint(config.adapter_stash_url.clone(), tls.clone())
             .await?;
-        let adapter_storage = mz_adapter::catalog::storage::Connection::open(
-            savepoint_stash,
-            config.now.clone(),
-            &BootstrapArgs {
-                default_cluster_replica_size: config.bootstrap_default_cluster_replica_size,
-                builtin_cluster_replica_size: config.bootstrap_builtin_cluster_replica_size,
-                // TODO(benesch, brennan): remove this after v0.27.0-alpha.4 has
-                // shipped to cloud since all clusters will have had a default
-                // availability zone installed.
-                default_availability_zone: config
-                    .availability_zones
-                    .choose(&mut rand::thread_rng())
-                    .cloned()
-                    .unwrap_or_else(|| mz_adapter::DUMMY_AVAILABILITY_ZONE.into()),
-                bootstrap_role: config.bootstrap_role,
-            },
-        )
-        .await?;
-
-        match stash_generation.cmp(&deploy_generation.try_into()?)
+        let stash_generation = stash.deploy_generation().await?;
+        tracing::info!("Found stash generation {stash_generation:?}");
+        if let Some(stash_generation) = stash_generation {
+            match stash_generation.cmp(&deploy_generation)
             {
                 Ordering::Less => {
+                    tracing::info!("Stash generation {stash_generation} is less than deploy generation {deploy_generation}. Performing pre-flight checks");
 
-                    tracing::info!("Performing stash verification");
+                    if let Err(e) = mz_adapter::catalog::storage::Connection::open(
+                        stash,
+                        config.now.clone(),
+                        &BootstrapArgs {
+                            default_cluster_replica_size: config.bootstrap_default_cluster_replica_size.clone(),
+                            builtin_cluster_replica_size: config.bootstrap_builtin_cluster_replica_size.clone(),
+                            default_availability_zone: mz_adapter::DUMMY_AVAILABILITY_ZONE.into(),
+                            bootstrap_role: config.bootstrap_role.clone(),
+                        },
+                        None,
+                    )
+                    .await {
+                        return Err(anyhow!(e).context("Stash upgrade would have failed with this error"));
+                    }
 
-                    // TODO: uh, figure out how to verify stash, probably wait til after parker's changes
-
-                    stash_verify_finished_tx.send(()).expect("internal http server died");
+                    ready_to_promote_tx.send(()).expect("internal http server died");
 
                     tracing::info!("Waiting for user to promote this envd to leader. For example, `curl -H 'Content-Type: application/json' -X POST 'http://{}/api/leader/promote'`", config.internal_http_listen_addr);
-                    let () = wait_for_leader_promotion_rx.await.expect("internal http server died");
+                    let () = promote_leader_rx.await.expect("internal http server died");
                 }
                 Ordering::Equal => tracing::info!("Server requested generation {deploy_generation} which is equal to stash's generation"),
-                Ordering::Greater => mz_ore::halt!("Server started with requested generation {deploy_generation} but stash was already at {stash_generation}. We can't undo migrations."),
+                Ordering::Greater => mz_ore::halt!("Server started with requested generation {deploy_generation} but stash was already at {stash_generation}. Deploy generations must increase monotonically"),
             }
+        }
     };
 
     let stash = config
@@ -401,6 +377,7 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
                 .unwrap_or_else(|| mz_adapter::DUMMY_AVAILABILITY_ZONE.into()),
             bootstrap_role: config.bootstrap_role,
         },
+        config.deploy_generation,
     )
     .await?;
 

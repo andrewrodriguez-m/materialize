@@ -57,6 +57,7 @@ pub use stash::{
 };
 
 const USER_VERSION: &str = "user_version";
+const DEPLOY_GENERATION: &str = "deploy_generation";
 
 pub const MZ_SYSTEM_ROLE_ID: RoleId = RoleId::System(1);
 pub const MZ_INTROSPECTION_ROLE_ID: RoleId = RoleId::System(2);
@@ -184,6 +185,7 @@ impl Connection {
         mut stash: Stash,
         now: NowFn,
         bootstrap_args: &BootstrapArgs,
+        deploy_generation: Option<u64>,
     ) -> Result<Connection, Error> {
         // Initialize the Stash if it hasn't been already
         let mut conn = if !stash.is_initialized().await? {
@@ -195,7 +197,9 @@ impl Connection {
             let args = bootstrap_args.clone();
             stash
                 .with_transaction(move |mut tx| {
-                    Box::pin(async move { stash::initialize(&mut tx, &args, boot_ts.into()).await })
+                    Box::pin(async move {
+                        stash::initialize(&mut tx, &args, boot_ts.into(), deploy_generation).await
+                    })
                 })
                 .await?;
 
@@ -223,6 +227,9 @@ impl Connection {
                 // IMPORTANT: we durably record the new timestamp before using it.
                 conn.persist_timestamp(&Timeline::EpochMilliseconds, boot_ts)
                     .await?;
+                if let Some(deploy_generation) = deploy_generation {
+                    conn.persist_deploy_generation(deploy_generation).await?;
+                }
             }
 
             conn
@@ -445,6 +452,17 @@ impl Connection {
                 })
             })
             .await?)
+    }
+
+    pub fn update_user_version(&mut self, version: u64) -> Result<(), Error> {
+        let prev = self.configs.set(
+            ConfigKey {
+                key: USER_VERSION.to_string(),
+            },
+            Some(ConfigValue { value: version }),
+        )?;
+        assert!(prev.is_some());
+        Ok(())
     }
 
     /// Load the persisted mapping of system object to global ID. Key is (schema-name, object-name).
@@ -711,6 +729,23 @@ impl Connection {
         if let Some(prev) = prev {
             assert!(next >= prev, "global timestamp must always go up");
         }
+        Ok(())
+    }
+
+    pub async fn persist_deploy_generation(&mut self, deploy_generation: u64) -> Result<(), Error> {
+        CONFIG_COLLECTION
+            .upsert_key(
+                &mut self.stash,
+                proto::ConfigKey {
+                    key: DEPLOY_GENERATION.into(),
+                },
+                move |_| {
+                    Ok::<_, Error>(proto::ConfigValue {
+                        value: deploy_generation,
+                    })
+                },
+            )
+            .await??;
         Ok(())
     }
 
@@ -1349,17 +1384,6 @@ impl<'a> Transaction<'a> {
         } else {
             Err(SqlCatalogError::UnknownItem(id.to_string()).into())
         }
-    }
-
-    pub fn update_user_version(&mut self, version: u64) -> Result<(), Error> {
-        let prev = self.configs.set(
-            ConfigKey {
-                key: USER_VERSION.to_string(),
-            },
-            Some(ConfigValue { value: version }),
-        )?;
-        assert!(prev.is_some());
-        Ok(())
     }
 
     /// Updates persisted mapping from system objects to global IDs and fingerprints. Each element

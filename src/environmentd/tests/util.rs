@@ -407,6 +407,7 @@ pub fn start_server(config: Config) -> Result<Server, anyhow::Error> {
         launchdarkly_key_map: Default::default(),
         config_sync_loop_interval: None,
         bootstrap_role: config.bootstrap_role,
+        deploy_generation: None,
     }))?;
     let server = Server {
         inner,

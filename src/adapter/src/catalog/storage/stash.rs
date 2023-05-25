@@ -32,6 +32,9 @@ use crate::rbac;
 /// The key used within the "config" collection where we store the Stash version.
 const USER_VERSION: &str = "user_version";
 
+/// The key used within the "config" collection where we store the deploy generation.
+const DEPLOY_GENERATION: &str = "deploy_generation";
+
 pub const SETTING_COLLECTION: TypedCollection<proto::SettingKey, proto::SettingValue> =
     TypedCollection::new("setting");
 pub const SYSTEM_GID_MAPPING_COLLECTION: TypedCollection<
@@ -98,6 +101,7 @@ pub async fn initialize(
     tx: &mut Transaction<'_>,
     options: &BootstrapArgs,
     now: EpochMillis,
+    deploy_generation: Option<u64>,
 ) -> Result<(), StashError> {
     // During initialization we need to allocate IDs for certain things. We'll track what IDs we've
     // allocated, persisting the "next ids" at the end.
@@ -551,19 +555,25 @@ pub async fn initialize(
     STORAGE_USAGE_COLLECTION.initialize(tx, vec![]).await?;
 
     // Set our initial version.
-    CONFIG_COLLECTION
-        .initialize(
-            tx,
-            [(
-                proto::ConfigKey {
-                    key: USER_VERSION.to_string(),
-                },
-                proto::ConfigValue {
-                    value: STASH_VERSION,
-                },
-            )],
-        )
-        .await?;
+    let mut configs = vec![(
+        proto::ConfigKey {
+            key: USER_VERSION.to_string(),
+        },
+        proto::ConfigValue {
+            value: STASH_VERSION,
+        },
+    )];
+    if let Some(deploy_generation) = deploy_generation {
+        configs.push((
+            proto::ConfigKey {
+                key: DEPLOY_GENERATION.to_string(),
+            },
+            proto::ConfigValue {
+                value: deploy_generation,
+            },
+        ));
+    }
+    CONFIG_COLLECTION.initialize(tx, configs).await?;
 
     Ok(())
 }
