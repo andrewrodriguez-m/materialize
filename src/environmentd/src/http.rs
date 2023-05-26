@@ -43,6 +43,7 @@ use mz_sql::session::user::{ExternalUserMetadata, User, HTTP_DEFAULT_USER, SYSTE
 use mz_sql::session::vars::{ConnectionCounter, DropConnection, VarInput};
 use openssl::ssl::{Ssl, SslContext};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -228,7 +229,12 @@ pub async fn handle_leader_status(
         match ready_to_promote.try_recv() {
             Ok(()) => leader_state.status = LeaderStatus::ReadyToPromote,
             Err(TryRecvError::Empty) => (),
-            Err(TryRecvError::Closed) => panic!("other side closed ready_to_promote"),
+            Err(TryRecvError::Closed) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "ready_to_promote channel is closed"})),
+                )
+            }
         }
     }
     (
@@ -274,14 +280,25 @@ pub async fn handle_leader_promote(
             })),
         ),
         LeaderStatus::ReadyToPromote => {
-            leader_state
+            match leader_state
                 .promote_leader
                 .take()
                 .expect("state machine bug")
                 .send(())
-                .expect("other side disconnected");
-            leader_state.status = LeaderStatus::IsLeader;
-            success
+            {
+                Ok(()) => {
+                    leader_state.status = LeaderStatus::IsLeader;
+                    success
+                }
+                Err(()) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!(BecomeLeaderResult::Failure {
+                        message:
+                            "Cannot promote to leader because promote_leader channel is closed"
+                                .into()
+                    })),
+                ),
+            }
         }
     }
 }

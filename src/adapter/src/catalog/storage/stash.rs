@@ -555,27 +555,44 @@ pub async fn initialize(
     STORAGE_USAGE_COLLECTION.initialize(tx, vec![]).await?;
 
     // Set our initial version.
-    let mut configs = vec![(
-        proto::ConfigKey {
-            key: USER_VERSION.to_string(),
-        },
-        proto::ConfigValue {
-            value: STASH_VERSION,
-        },
-    )];
-    if let Some(deploy_generation) = deploy_generation {
-        configs.push((
-            proto::ConfigKey {
-                key: DEPLOY_GENERATION.to_string(),
-            },
-            proto::ConfigValue {
-                value: deploy_generation,
-            },
-        ));
-    }
-    CONFIG_COLLECTION.initialize(tx, configs).await?;
+    CONFIG_COLLECTION
+        .initialize(
+            tx,
+            [
+                (
+                    proto::ConfigKey {
+                        key: USER_VERSION.to_string(),
+                    },
+                    proto::ConfigValue {
+                        value: STASH_VERSION,
+                    },
+                ),
+                (
+                    proto::ConfigKey {
+                        key: DEPLOY_GENERATION.to_string(),
+                    },
+                    proto::ConfigValue {
+                        value: deploy_generation.unwrap_or(0),
+                    },
+                ),
+            ],
+        )
+        .await?;
 
     Ok(())
+}
+
+pub async fn deploy_generation(tx: &mut Transaction<'_>) -> Result<Option<u64>, StashError> {
+    let config = CONFIG_COLLECTION.from_tx(&tx).await?;
+    let value = tx
+        .peek_key_one(
+            config,
+            &proto::ConfigKey {
+                key: DEPLOY_GENERATION.into(),
+            },
+        )
+        .await?;
+    Ok(value.map(|v| v.value))
 }
 
 /// Defines the default config for a Cluster Replica.

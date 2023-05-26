@@ -90,7 +90,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
-use mz_adapter::catalog::storage::BootstrapArgs;
+use mz_adapter::catalog::storage::{stash, BootstrapArgs};
 use mz_adapter::catalog::ClusterReplicaSizeMap;
 use mz_adapter::config::{system_parameter_sync, SystemParameterBackend, SystemParameterFrontend};
 use mz_build_info::{build_info, BuildInfo};
@@ -110,6 +110,7 @@ use mz_storage_client::types::connections::ConnectionContext;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use rand::seq::SliceRandom;
 use tokio::sync::oneshot;
+use tokio::sync::oneshot::error::RecvError;
 use tower_http::cors::AllowOrigin;
 
 use crate::http::{HttpConfig, HttpServer, InternalHttpConfig, InternalHttpServer};
@@ -326,9 +327,14 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
                 }
             }
         };
-        let Some(stash_generation) = stash.deploy_generation().await? else {
-                tracing::info!("Stash has no generation, not waiting for leader promotion");
-            break 'wait_for_leader_promotion };
+        let Some(stash_generation) = stash.with_transaction(move |mut tx| {
+            Box::pin(async move {
+                stash::deploy_generation(&mut tx).await
+            })
+        }).await? else {
+            tracing::info!("Stash has no generation, not waiting for leader promotion");
+            break 'wait_for_leader_promotion;
+         };
         tracing::info!("Found stash generation {stash_generation:?}");
         match stash_generation.cmp(&deploy_generation) {
             Ordering::Less => {
@@ -348,13 +354,18 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
                     return Err(anyhow!(e).context("Stash upgrade would have failed with this error"));
                 }
 
-                ready_to_promote_tx.send(()).expect("internal http server died");
+                if let Err(()) = ready_to_promote_tx.send(()) {
+                    return Err(anyhow!("internal http server closed its end of ready_to_promote"));
+                }
 
                 tracing::info!("Waiting for user to promote this envd to leader. For example, `curl -H 'Content-Type: application/json' -X POST 'http://{}/api/leader/promote'`", config.internal_http_listen_addr);
                 if let Some(waiting_on_leader_promotion) = config.waiting_on_leader_promotion.take() {
                     Arc::try_unwrap(waiting_on_leader_promotion).expect("for testing").send(internal_http_listener.local_addr()).expect("other side disappeared");
                 }
-                let () = promote_leader_rx.await.expect("internal http server died");
+                if let Err(RecvError{..}) = promote_leader_rx.await {
+                    return Err(anyhow!("internal http server closed its end of promote_leader"));
+
+                }
             }
             Ordering::Equal => tracing::info!("Server requested generation {deploy_generation} which is equal to stash's generation"),
             Ordering::Greater => mz_ore::halt!("Server started with requested generation {deploy_generation} but stash was already at {stash_generation}. Deploy generations must increase monotonically"),

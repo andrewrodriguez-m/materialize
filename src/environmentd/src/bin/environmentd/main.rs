@@ -832,14 +832,7 @@ fn run(mut args: Args) -> Result<(), anyhow::Error> {
         "environmentd {} listening...",
         mz_environmentd::BUILD_INFO.human_version()
     );
-    println!(" SQL address: {}", args.sql_listen_addr);
-    println!(" HTTP address: {}", args.http_listen_addr);
-    println!(" Internal SQL address: {}", args.internal_sql_listen_addr);
     println!(" Internal HTTP address: {}", args.internal_http_listen_addr);
-    println!(
-        " Internal Persist PubSub address: {}",
-        args.internal_persist_pubsub_listen_addr
-    );
 
     let _server = runtime.block_on(mz_environmentd::serve(mz_environmentd::Config {
         sql_listen_addr: args.sql_listen_addr,
@@ -902,6 +895,14 @@ fn run(mut args: Args) -> Result<(), anyhow::Error> {
     let span = span.exit();
     let id = span.context().span().span_context().trace_id();
     drop(span);
+
+    println!(" SQL address: {}", args.sql_listen_addr);
+    println!(" HTTP address: {}", args.http_listen_addr);
+    println!(" Internal SQL address: {}", args.internal_sql_listen_addr);
+    println!(
+        " Internal Persist PubSub address: {}",
+        args.internal_persist_pubsub_listen_addr
+    );
 
     println!(" Root trace ID: {id}");
 
