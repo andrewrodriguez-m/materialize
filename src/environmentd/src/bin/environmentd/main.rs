@@ -889,6 +889,7 @@ fn run(mut args: Args) -> Result<(), anyhow::Error> {
         config_sync_loop_interval: args.config_sync_loop_interval,
         bootstrap_role: args.bootstrap_role,
         deploy_generation: args.deploy_generation,
+        waiting_on_leader_promotion: None,
     }))?;
 
     metrics.start_time_environmentd.set(

@@ -222,6 +222,9 @@ pub struct Config {
     // === Testing options. ===
     /// A now generation function for mocking time.
     pub now: NowFn,
+    /// When waiting for leader promotion, the server will send the socket addr of
+    /// the internal http server
+    pub waiting_on_leader_promotion: Option<Arc<oneshot::Sender<SocketAddr>>>,
 }
 
 /// Configures TLS encryption for connections.
@@ -235,7 +238,7 @@ pub struct TlsConfig {
 
 /// Start an `environmentd` server.
 #[tracing::instrument(name = "environmentd::serve", level = "info", skip_all)]
-pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
+pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
     let tls = mz_postgres_util::make_tls(&tokio_postgres::config::Config::from_str(
         &config.adapter_stash_url,
     )?)?;
@@ -348,6 +351,9 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
                 ready_to_promote_tx.send(()).expect("internal http server died");
 
                 tracing::info!("Waiting for user to promote this envd to leader. For example, `curl -H 'Content-Type: application/json' -X POST 'http://{}/api/leader/promote'`", config.internal_http_listen_addr);
+                if let Some(waiting_on_leader_promotion) = config.waiting_on_leader_promotion.take() {
+                    Arc::try_unwrap(waiting_on_leader_promotion).expect("for testing").send(internal_http_listener.local_addr()).expect("other side disappeared");
+                }
                 let () = promote_leader_rx.await.expect("internal http server died");
             }
             Ordering::Equal => tracing::info!("Server requested generation {deploy_generation} which is equal to stash's generation"),

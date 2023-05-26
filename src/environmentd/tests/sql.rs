@@ -2313,8 +2313,7 @@ fn test_coord_startup_blocking() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let server =
-            util::start_server(config.clone()).expect("unable to start server asynchronously");
+        let server = util::start_server(config).expect("unable to start server asynchronously");
         let mut client = server
             .connect(postgres::NoTls)
             .expect("unable to start client asynchronously");

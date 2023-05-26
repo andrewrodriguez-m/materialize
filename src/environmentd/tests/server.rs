@@ -80,7 +80,6 @@ use std::fmt::Write;
 use std::net::Ipv4Addr;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread::spawn;
 use std::time::{Duration, Instant};
 use std::{iter, thread};
 
@@ -88,6 +87,9 @@ use anyhow::bail;
 use chrono::{DateTime, Utc};
 use http::StatusCode;
 use itertools::Itertools;
+use mz_environmentd::http::{
+    BecomeLeaderResponse, BecomeLeaderResult, LeaderStatus, LeaderStatusResponse,
+};
 use mz_environmentd::WebSocketResponse;
 use mz_ore::cast::CastLossy;
 use mz_ore::now::NowFn;
@@ -98,6 +100,7 @@ use reqwest::blocking::Client;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 use tokio_postgres::error::SqlState;
 use tracing::info;
 use tungstenite::error::ProtocolError;
@@ -1388,14 +1391,48 @@ fn test_leader_promotion() {
     }
     {
         // start with different deploy generation, we need acknowledgement before starting sql port
-        let config = config.with_deploy_generation(Some(3));
+        let (internal_http_addr_tx, internal_http_addr_rx) = oneshot::channel();
+        let config = config
+            .with_deploy_generation(Some(3))
+            .with_waiting_on_leader_promotion(Some(Arc::new(internal_http_addr_tx)));
         thread::scope(|s| {
-            s.spawn(|| {
-                let server = util::start_server(config).unwrap();
-            })
-        });
+            let server_handle = s.spawn(|| util::start_server(config).unwrap());
 
-        let mut client = server.connect(postgres::NoTls).unwrap();
-        client.simple_query("SELECT 1").unwrap();
+            let internal_http_addr = internal_http_addr_rx.blocking_recv().unwrap();
+            let status_http_url =
+                Url::parse(&format!("http://{}/api/leader/status", internal_http_addr)).unwrap();
+
+            Retry::default()
+                .max_tries(10)
+                .retry(|_state| {
+                    let res = Client::new().get(status_http_url.clone()).send().unwrap();
+                    assert_eq!(res.status(), StatusCode::OK);
+                    let response: LeaderStatusResponse = res.json().unwrap();
+                    assert_ne!(response.status, LeaderStatus::IsLeader);
+                    if response.status == LeaderStatus::ReadyToPromote {
+                        Ok(())
+                    } else {
+                        Err(())
+                    }
+                })
+                .unwrap();
+
+            let promote_http_url =
+                Url::parse(&format!("http://{}/api/leader/promote", internal_http_addr)).unwrap();
+
+            let res = Client::new().post(promote_http_url).send().unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let response: BecomeLeaderResponse = res.json().unwrap();
+            assert_eq!(
+                response,
+                BecomeLeaderResponse {
+                    result: BecomeLeaderResult::Success
+                }
+            );
+
+            let server = server_handle.join().unwrap();
+            let mut client = server.connect(postgres::NoTls).unwrap();
+            client.simple_query("SELECT 1").unwrap();
+        });
     }
 }

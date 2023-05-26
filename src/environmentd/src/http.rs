@@ -198,34 +198,36 @@ pub struct InternalHttpServer {
 
 #[derive(Debug)]
 pub struct LeaderState {
-    status: LeaderStatus,
+    pub status: LeaderStatus,
     pub promote_leader: Option<oneshot::Sender<()>>,
     pub ready_to_promote: Option<oneshot::Receiver<()>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct LeaderStatusResponse {
-    status: LeaderStatus,
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LeaderStatusResponse {
+    pub status: LeaderStatus,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum LeaderStatus {
-    IsLeader, // 200: The current leader returns this. It shouldn't need to know that another instance is attempting to update it.
-    Initializing, // 200: The new pod should return this status until it is ready to become the leader, or it has determined that it cannot proceed.
-    ReadyToPromote, // 200: Once we receive this status, we can tell it to become the leader and migrate the EIP.
+pub enum LeaderStatus {
+    /// 200: The current leader returns this. It shouldn't need to know that another instance is attempting to update it.
+    IsLeader,
+    /// 200: The new pod should return this status until it is ready to become the leader, or it has determined that it cannot proceed.
+    Initializing,
+    /// 200: Once we receive this status, we can tell it to become the leader and migrate the EIP.
+    ReadyToPromote,
 }
 
 pub async fn handle_leader_status(
     State(state): State<Arc<Mutex<LeaderState>>>,
 ) -> impl IntoResponse {
     let mut leader_state = state.lock().expect("lock poisoned");
-    if let Some(mut ready_to_promote) = leader_state.ready_to_promote.take() {
-        assert_eq!(leader_state.status, LeaderStatus::Initializing);
+    let status = leader_state.status;
+    if let Some(ready_to_promote) = leader_state.ready_to_promote.as_mut() {
+        assert_eq!(status, LeaderStatus::Initializing);
         match ready_to_promote.try_recv() {
             Ok(()) => leader_state.status = LeaderStatus::ReadyToPromote,
-            Err(TryRecvError::Empty) => {
-                leader_state.ready_to_promote = Some(ready_to_promote);
-            }
+            Err(TryRecvError::Empty) => (),
             Err(TryRecvError::Closed) => panic!("other side closed ready_to_promote"),
         }
     }
@@ -237,13 +239,13 @@ pub async fn handle_leader_status(
     )
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct BecomeLeaderResponse {
-    result: BecomeLeaderResult,
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BecomeLeaderResponse {
+    pub result: BecomeLeaderResult,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-enum BecomeLeaderResult {
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BecomeLeaderResult {
     Success, // 200 http status: also return this if we are already the leader
     Failure {
         // 500 http status if called when not `ReadyToPromote`.
