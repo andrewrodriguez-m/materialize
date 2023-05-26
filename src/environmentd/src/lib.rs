@@ -320,7 +320,7 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
             Err(e) => {
                 if e.can_recover_with_write_mode() {
                     tracing::info!("Stash doesn't exist so there's no current deploy generation. We won't wait to be leader");
-                    break 'leader_promotion; // new stash
+                    break 'leader_promotion;
                 } else {
                     return Err(e.into());
                 }

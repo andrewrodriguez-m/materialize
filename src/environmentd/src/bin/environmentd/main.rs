@@ -828,13 +828,7 @@ fn run(mut args: Args) -> Result<(), anyhow::Error> {
     emit_boot_diagnostics!(&BUILD_INFO);
     sys::adjust_rlimits();
 
-    println!(
-        "environmentd {} listening...",
-        mz_environmentd::BUILD_INFO.human_version()
-    );
-    println!(" Internal HTTP address: {}", args.internal_http_listen_addr);
-
-    let _server = runtime.block_on(mz_environmentd::serve(mz_environmentd::Config {
+    let server = runtime.block_on(mz_environmentd::serve(mz_environmentd::Config {
         sql_listen_addr: args.sql_listen_addr,
         http_listen_addr: args.http_listen_addr,
         internal_sql_listen_addr: args.internal_sql_listen_addr,
@@ -896,9 +890,20 @@ fn run(mut args: Args) -> Result<(), anyhow::Error> {
     let id = span.context().span().span_context().trace_id();
     drop(span);
 
-    println!(" SQL address: {}", args.sql_listen_addr);
-    println!(" HTTP address: {}", args.http_listen_addr);
-    println!(" Internal SQL address: {}", args.internal_sql_listen_addr);
+    println!(
+        "environmentd {} listening...",
+        mz_environmentd::BUILD_INFO.human_version()
+    );
+    println!(" SQL address: {}", server.sql_local_addr());
+    println!(" HTTP address: {}", server.http_local_addr());
+    println!(
+        " Internal SQL address: {}",
+        server.internal_sql_local_addr()
+    );
+    println!(
+        " Internal HTTP address: {}",
+        server.internal_http_local_addr()
+    );
     println!(
         " Internal Persist PubSub address: {}",
         args.internal_persist_pubsub_listen_addr
