@@ -307,8 +307,8 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
         server::serve(internal_http_conns, internal_http_server)
     });
 
-    'wait_for_leader_promotion: {
-        let Some(deploy_generation) = config.deploy_generation else { break 'wait_for_leader_promotion };
+    'leader_promotion: {
+        let Some(deploy_generation) = config.deploy_generation else { break 'leader_promotion };
         tracing::info!("Requested deploy generation {deploy_generation}");
         let mut stash = match config
             .controller
@@ -319,8 +319,8 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
             Ok(stash) => stash,
             Err(e) => {
                 if e.can_recover_with_write_mode() {
-                    tracing::info!("Stash doesn't exist, we need to create it");
-                    break 'wait_for_leader_promotion; // new stash
+                    tracing::info!("Stash doesn't exist so there's no current deploy generation. We won't wait to be leader");
+                    break 'leader_promotion; // new stash
                 } else {
                     return Err(e.into());
                 }
@@ -333,7 +333,7 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
             })
         }).await? else {
             tracing::info!("Stash has no generation, not waiting for leader promotion");
-            break 'wait_for_leader_promotion;
+            break 'leader_promotion;
          };
         tracing::info!("Found stash generation {stash_generation:?}");
         match stash_generation.cmp(&deploy_generation) {

@@ -203,11 +203,11 @@ pub struct LeaderStatusResponse {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LeaderStatus {
-    /// 200: The current leader returns this. It shouldn't need to know that another instance is attempting to update it.
+    /// The current leader returns this. It shouldn't need to know that another instance is attempting to update it.
     IsLeader,
-    /// 200: The new pod should return this status until it is ready to become the leader, or it has determined that it cannot proceed.
+    /// The new pod should return this status until it is ready to become the leader, or it has determined that it cannot proceed.
     Initializing,
-    /// 200: Once we receive this status, we can tell it to become the leader and migrate the EIP.
+    /// Once we receive this status, we can tell it to become the leader and migrate the EIP.
     ReadyToPromote,
 }
 
@@ -254,7 +254,7 @@ pub async fn handle_leader_status(
                     };
                 }
                 Err(TryRecvError::Closed) => {
-                    // server has started, it is the leader
+                    *leader_state = LeaderState::IsLeader; // server has started, it is the leader now
                 }
             }
         }
@@ -287,34 +287,33 @@ pub async fn handle_leader_promote(
 ) -> impl IntoResponse {
     let mut leader_state = state.lock().expect("lock poisoned");
 
-    let success = (
-        StatusCode::OK,
-        Json(serde_json::json!(BecomeLeaderResponse {
-            result: BecomeLeaderResult::Success,
-        })),
-    );
-
     // If we're still Initializing we swap back the state, otherwise we end up as the Leader no matter what
     let mut state = LeaderState::IsLeader;
     std::mem::swap(&mut *leader_state, &mut state);
 
     match state {
-        LeaderState::IsLeader => success,
+        LeaderState::IsLeader => (),
         LeaderState::Initializing { .. } => {
             std::mem::swap(&mut *leader_state, &mut state);
-            (
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!(BecomeLeaderResult::Failure {
                     message: "Not ready to promote, still initializing".into(),
                 })),
-            )
+            );
         }
         LeaderState::ReadyToPromote { promote_leader } => {
             // even if send fails it means the server has started and we're already the leader
+            *leader_state = LeaderState::IsLeader;
             let _ = promote_leader.send(());
-            success
         }
     }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(BecomeLeaderResponse {
+            result: BecomeLeaderResult::Success,
+        })),
+    )
 }
 
 impl InternalHttpServer {
