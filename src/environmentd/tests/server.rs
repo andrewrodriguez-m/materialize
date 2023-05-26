@@ -1376,19 +1376,20 @@ fn test_leader_promotion() {
     let tmpdir = TempDir::new().unwrap();
     let config = util::Config::default()
         .unsafe_mode()
-        .data_directory(tmpdir.path())
-        .with_deploy_generation(Some(2));
+        .data_directory(tmpdir.path());
     {
+        // start with a stash with no deploy generation to match current production
         let server = util::start_server(config.clone()).unwrap();
         let mut client = server.connect(postgres::NoTls).unwrap();
         client.simple_query("SELECT 1").unwrap();
     }
     {
-        // start with same deploy generation, everything works
+        // propose a deploy generation for the first time
         let server = util::start_server(config.clone()).unwrap();
         let mut client = server.connect(postgres::NoTls).unwrap();
         client.simple_query("SELECT 1").unwrap();
     }
+    let config = config.with_deploy_generation(Some(2));
     {
         // start with different deploy generation, we need acknowledgement before starting sql port
         let (internal_http_addr_tx, internal_http_addr_rx) = oneshot::channel();
@@ -1434,5 +1435,28 @@ fn test_leader_promotion() {
             let mut client = server.connect(postgres::NoTls).unwrap();
             client.simple_query("SELECT 1").unwrap();
         });
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // too slow
+fn test_leader_promotion_always_using_deploy_generation() {
+    mz_ore::test::init_logging();
+    let tmpdir = TempDir::new().unwrap();
+    let config = util::Config::default()
+        .unsafe_mode()
+        .data_directory(tmpdir.path())
+        .with_deploy_generation(Some(2));
+    {
+        // propose a deploy generation for the first time
+        let server = util::start_server(config.clone()).unwrap();
+        let mut client = server.connect(postgres::NoTls).unwrap();
+        client.simple_query("SELECT 1").unwrap();
+    }
+    {
+        // keep it the same, no need to promote the leader
+        let server = util::start_server(config.clone()).unwrap();
+        let mut client = server.connect(postgres::NoTls).unwrap();
+        client.simple_query("SELECT 1").unwrap();
     }
 }

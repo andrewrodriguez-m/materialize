@@ -582,8 +582,8 @@ pub async fn initialize(
     Ok(())
 }
 
-pub async fn deploy_generation(tx: &mut Transaction<'_>) -> Result<Option<u64>, StashError> {
-    let config = CONFIG_COLLECTION.from_tx(&tx).await?;
+pub async fn deploy_generation(tx: &Transaction<'_>) -> Result<Option<u64>, StashError> {
+    let config = CONFIG_COLLECTION.from_tx(tx).await?;
     let value = tx
         .peek_key_one(
             config,

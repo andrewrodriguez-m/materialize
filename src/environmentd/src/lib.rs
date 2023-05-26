@@ -307,7 +307,6 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
         server::serve(internal_http_conns, internal_http_server)
     });
 
-    tracing::info!("hello world");
     'wait_for_leader_promotion: {
         let Some(deploy_generation) = config.deploy_generation else { break 'wait_for_leader_promotion };
         tracing::info!("Requested deploy generation {deploy_generation}");
@@ -327,9 +326,9 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
                 }
             }
         };
-        let Some(stash_generation) = stash.with_transaction(move |mut tx| {
+        let Some(stash_generation) = stash.with_transaction(move |tx| {
             Box::pin(async move {
-                stash::deploy_generation(&mut tx).await
+                stash::deploy_generation(&tx).await
             })
         }).await? else {
             tracing::info!("Stash has no generation, not waiting for leader promotion");
@@ -364,7 +363,6 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
                 }
                 if let Err(RecvError{..}) = promote_leader_rx.await {
                     return Err(anyhow!("internal http server closed its end of promote_leader"));
-
                 }
             }
             Ordering::Equal => tracing::info!("Server requested generation {deploy_generation} which is equal to stash's generation"),
