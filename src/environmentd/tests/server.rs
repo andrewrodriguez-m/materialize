@@ -1388,6 +1388,43 @@ fn test_leader_promotion() {
         let server = util::start_server(config.clone()).unwrap();
         let mut client = server.connect(postgres::NoTls).unwrap();
         client.simple_query("SELECT 1").unwrap();
+
+        // make sure asking about the leader and promoting don't panic
+        let res = Client::new()
+            .get(
+                Url::parse(&format!(
+                    "http://{}/api/leader/status",
+                    server.inner.internal_http_local_addr()
+                ))
+                .unwrap(),
+            )
+            .send()
+            .unwrap();
+        tracing::info!("response: {res:?}");
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{:?}",
+            res.json::<serde_json::Value>()
+        );
+
+        let res = Client::new()
+            .post(
+                Url::parse(&format!(
+                    "http://{}/api/leader/promote",
+                    server.inner.internal_http_local_addr()
+                ))
+                .unwrap(),
+            )
+            .send()
+            .unwrap();
+        tracing::info!("response: {res:?}");
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{:?}",
+            res.json::<serde_json::Value>()
+        );
     }
     let config = config.with_deploy_generation(Some(2));
     {

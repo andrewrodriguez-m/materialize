@@ -43,7 +43,6 @@ use mz_sql::session::user::{ExternalUserMetadata, User, HTTP_DEFAULT_USER, SYSTE
 use mz_sql::session::vars::{ConnectionCounter, DropConnection, VarInput};
 use openssl::ssl::{Ssl, SslContext};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -189,19 +188,12 @@ pub struct InternalHttpConfig {
     pub tracing_handle: TracingHandle,
     pub adapter_client_rx: oneshot::Receiver<mz_adapter::Client>,
     pub active_connection_count: Arc<Mutex<ConnectionCounter>>,
-    pub promote_leader: Option<oneshot::Sender<()>>,
-    pub ready_to_promote: Option<oneshot::Receiver<()>>,
+    pub promote_leader: oneshot::Sender<()>,
+    pub ready_to_promote: oneshot::Receiver<()>,
 }
 
 pub struct InternalHttpServer {
     router: Router,
-}
-
-#[derive(Debug)]
-pub struct LeaderState {
-    pub status: LeaderStatus,
-    pub promote_leader: Option<oneshot::Sender<()>>,
-    pub ready_to_promote: Option<oneshot::Receiver<()>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -219,28 +211,59 @@ pub enum LeaderStatus {
     ReadyToPromote,
 }
 
+#[derive(Debug)]
+pub enum LeaderState {
+    IsLeader,
+    Initializing {
+        promote_leader: oneshot::Sender<()>,
+        ready_to_promote: oneshot::Receiver<()>,
+    },
+    ReadyToPromote {
+        promote_leader: oneshot::Sender<()>,
+    },
+}
+
+fn state_to_status(state: &LeaderState) -> LeaderStatus {
+    match state {
+        LeaderState::IsLeader => LeaderStatus::IsLeader,
+        LeaderState::Initializing { .. } => LeaderStatus::Initializing,
+        LeaderState::ReadyToPromote { .. } => LeaderStatus::ReadyToPromote,
+    }
+}
+
 pub async fn handle_leader_status(
     State(state): State<Arc<Mutex<LeaderState>>>,
 ) -> impl IntoResponse {
     let mut leader_state = state.lock().expect("lock poisoned");
-    let status = leader_state.status;
-    if let Some(ready_to_promote) = leader_state.ready_to_promote.as_mut() {
-        assert_eq!(status, LeaderStatus::Initializing);
-        match ready_to_promote.try_recv() {
-            Ok(()) => leader_state.status = LeaderStatus::ReadyToPromote,
-            Err(TryRecvError::Empty) => (),
-            Err(TryRecvError::Closed) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "ready_to_promote channel is closed"})),
-                )
+    let mut state = LeaderState::IsLeader;
+    std::mem::swap(&mut *leader_state, &mut state);
+    match state {
+        LeaderState::IsLeader => (),
+        LeaderState::Initializing {
+            promote_leader,
+            mut ready_to_promote,
+        } => {
+            match ready_to_promote.try_recv() {
+                Ok(_) => {
+                    *leader_state = LeaderState::ReadyToPromote { promote_leader };
+                }
+                Err(TryRecvError::Empty) => {
+                    *leader_state = LeaderState::Initializing {
+                        promote_leader,
+                        ready_to_promote,
+                    };
+                }
+                Err(TryRecvError::Closed) => {
+                    // server has started, it is the leader
+                }
             }
         }
+        LeaderState::ReadyToPromote { .. } => (),
     }
     (
         StatusCode::OK,
         Json(serde_json::json!(LeaderStatusResponse {
-            status: leader_state.status
+            status: state_to_status(&leader_state),
         })),
     )
 }
@@ -271,34 +294,25 @@ pub async fn handle_leader_promote(
         })),
     );
 
-    match leader_state.status {
-        LeaderStatus::IsLeader => success,
-        LeaderStatus::Initializing => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!(BecomeLeaderResult::Failure {
-                message: "Not ready to promote, still initializing".into(),
-            })),
-        ),
-        LeaderStatus::ReadyToPromote => {
-            match leader_state
-                .promote_leader
-                .take()
-                .expect("state machine bug")
-                .send(())
-            {
-                Ok(()) => {
-                    leader_state.status = LeaderStatus::IsLeader;
-                    success
-                }
-                Err(()) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!(BecomeLeaderResult::Failure {
-                        message:
-                            "Cannot promote to leader because promote_leader channel is closed"
-                                .into()
-                    })),
-                ),
-            }
+    // If we're still Initializing we swap back the state, otherwise we end up as the Leader no matter what
+    let mut state = LeaderState::IsLeader;
+    std::mem::swap(&mut *leader_state, &mut state);
+
+    match state {
+        LeaderState::IsLeader => success,
+        LeaderState::Initializing { .. } => {
+            std::mem::swap(&mut *leader_state, &mut state);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!(BecomeLeaderResult::Failure {
+                    message: "Not ready to promote, still initializing".into(),
+                })),
+            )
+        }
+        LeaderState::ReadyToPromote { promote_leader } => {
+            // even if send fails it means the server has started and we're already the leader
+            let _ = promote_leader.send(());
+            success
         }
     }
 }
@@ -366,8 +380,7 @@ impl InternalHttpServer {
         let leader_router = Router::new()
             .route("/api/leader/status", routing::get(handle_leader_status))
             .route("/api/leader/promote", routing::post(handle_leader_promote))
-            .with_state(Arc::new(Mutex::new(LeaderState {
-                status: LeaderStatus::Initializing,
+            .with_state(Arc::new(Mutex::new(LeaderState::Initializing {
                 promote_leader,
                 ready_to_promote,
             })));

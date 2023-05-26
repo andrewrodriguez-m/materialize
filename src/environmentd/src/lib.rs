@@ -301,8 +301,8 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
             tracing_handle: config.tracing_handle,
             adapter_client_rx: internal_http_adapter_client_rx,
             active_connection_count: Arc::clone(&active_connection_count),
-            promote_leader: Some(promote_leader_tx),
-            ready_to_promote: Some(ready_to_promote_rx),
+            promote_leader: promote_leader_tx,
+            ready_to_promote: ready_to_promote_rx,
         });
         server::serve(internal_http_conns, internal_http_server)
     });
