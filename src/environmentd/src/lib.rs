@@ -326,6 +326,7 @@ pub async fn serve(mut config: Config) -> Result<Server, anyhow::Error> {
                 }
             }
         };
+        // TODO: once all stashes have a deploy_generation, don't need to handle the Option
         let Some(stash_generation) = stash.with_transaction(move |tx| {
             Box::pin(async move {
                 stash::deploy_generation(&tx).await

@@ -1455,7 +1455,7 @@ fn test_leader_promotion_always_using_deploy_generation() {
     }
     {
         // keep it the same, no need to promote the leader
-        let server = util::start_server(config.clone()).unwrap();
+        let server = util::start_server(config).unwrap();
         let mut client = server.connect(postgres::NoTls).unwrap();
         client.simple_query("SELECT 1").unwrap();
     }
